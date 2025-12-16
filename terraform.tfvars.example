@@ -1,0 +1,9 @@
+aws_region            = "eu-west-1"
+project               = "nitro-demo"
+parent_instance_name  = "nitro-demo-parent"
+parent_instance_type  = "m6i.xlarge"
+ssh_key_name          = "your-keypair"
+public_subnet_cidrs   = ["10.60.1.0/24", "10.60.2.0/24"]
+availability_zones    = ["eu-west-1a", "eu-west-1b"]
+allowed_ingress_cidrs = ["203.0.113.0/24"]
+create_kms_key        = true
