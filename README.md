@@ -29,7 +29,7 @@ For application build/run instructions, consult the upstream [bitcast-network/bi
 Workflow summary:
 1. Check out this repository and install Terraform 1.6.6 via `hashicorp/setup-terraform`.
 2. Assume the IAM role defined by `AWS_GITHUB_ROLE_ARN` to access the Terraform backend and AWS account.
-3. Run `terraform fmt -check`, `terraform init`, and `terraform plan -out tfplan` inside the selected directory (defaults to repo root).
+3. Run `terraform fmt -recursive` to auto-format the configuration, followed by `terraform fmt -check -recursive` to enforce style, then execute `terraform init` and `terraform plan -out tfplan` inside the selected directory (defaults to repo root).
 4. When `terraform_action=plan` (default) the generated plan is uploaded as an artifact; when `terraform_action=apply` the workflow executes `terraform apply -auto-approve tfplan`.
 
 Inputs:

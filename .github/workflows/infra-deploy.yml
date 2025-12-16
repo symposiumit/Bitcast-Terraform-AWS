@@ -45,6 +45,10 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
           aws-region: ${{ github.event.inputs.aws_region || env.DEFAULT_REGION }}
 
+      - name: Terraform fmt
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform fmt -recursive
+
       - name: Terraform fmt check
         working-directory: ${{ env.WORKING_DIR }}
         run: terraform fmt -check -recursive
