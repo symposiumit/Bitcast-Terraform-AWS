@@ -1,0 +1,195 @@
+name: Build Bitcast Enclave
+
+on:
+  workflow_dispatch:
+    inputs:
+      bitcast_ref:
+        description: Git ref (branch or tag) from bitcast-network/bitcast to build
+        required: false
+        default: main
+      bitcast_role:
+        description: Select which neuron to package
+        type: choice
+        options:
+          - validator
+          - miner
+        default: validator
+      image_tag:
+        description: Optional custom image tag (defaults to short commit SHA)
+        required: false
+      enclave_cpu_count:
+        description: vCPU count allocated to the enclave
+        required: true
+        default: "2"
+      enclave_memory_mib:
+        description: Memory (MiB) allocated to the enclave
+        required: true
+        default: "2048"
+      enclave_cid:
+        description: CID assigned to the enclave vsock proxy
+        required: true
+        default: "16"
+
+env:
+  DEFAULT_AWS_REGION: eu-west-1
+  DEFAULT_ECR_REPOSITORY: bitcast-nitro
+  DEFAULT_S3_BUCKET: bitcast-nitro-enclaves
+  DEFAULT_S3_PREFIX: eif
+
+jobs:
+  build-and-deploy:
+    name: Build + Push + Rollout
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+
+      - name: Clone Bitcast sources
+        run: |
+          git clone --depth 1 --branch "${{ inputs.bitcast_ref }}" https://github.com/bitcast-network/bitcast.git bitcast-src
+
+      - name: Copy container template
+        run: |
+          cp bitcast-container/Dockerfile bitcast-src/Dockerfile
+          cp bitcast-container/entrypoint.sh bitcast-src/entrypoint.sh
+          chmod +x bitcast-src/entrypoint.sh
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        working-directory: bitcast-src
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run unit tests
+        working-directory: bitcast-src
+        run: pytest -q
+
+      - name: Set build metadata
+        id: meta
+        run: |
+          IMAGE_TAG="${{ inputs.image_tag }}"
+          if [ -z "$IMAGE_TAG" ]; then
+            IMAGE_TAG="${GITHUB_SHA::7}"
+          fi
+
+          REGION="${{ vars.AWS_REGION }}"
+          if [ -z "$REGION" ]; then
+            REGION="$DEFAULT_AWS_REGION"
+          fi
+
+          ECR_REPOSITORY="${{ vars.BITCAST_ECR_REPOSITORY }}"
+          if [ -z "$ECR_REPOSITORY" ]; then
+            ECR_REPOSITORY="$DEFAULT_ECR_REPOSITORY"
+          fi
+
+          S3_BUCKET="${{ vars.BITCAST_ENCLAVE_BUCKET }}"
+          if [ -z "$S3_BUCKET" ]; then
+            S3_BUCKET="$DEFAULT_S3_BUCKET"
+          fi
+
+          S3_PREFIX="${{ vars.BITCAST_ENCLAVE_PREFIX }}"
+          if [ -z "$S3_PREFIX" ]; then
+            S3_PREFIX="$DEFAULT_S3_PREFIX"
+          fi
+
+          EIF_NAME="bitcast-${{ inputs.bitcast_role }}-${IMAGE_TAG}.eif"
+
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "aws_region=$REGION" >> "$GITHUB_OUTPUT"
+          echo "ecr_repository=$ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "s3_bucket=$S3_BUCKET" >> "$GITHUB_OUTPUT"
+          echo "s3_prefix=$S3_PREFIX" >> "$GITHUB_OUTPUT"
+          echo "eif_name=$EIF_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ steps.meta.outputs.aws_region }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push container
+        id: build
+        env:
+          BITCAST_ROLE: ${{ inputs.bitcast_role }}
+        run: |
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ steps.meta.outputs.ecr_repository }}:${{ steps.meta.outputs.image_tag }}"
+          docker buildx build \
+            --platform linux/amd64 \
+            --build-arg BITCAST_ROLE=${BITCAST_ROLE} \
+            --tag "$IMAGE_URI" \
+            bitcast-src
+          docker push "$IMAGE_URI"
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+      - name: Build EIF artifact
+        run: |
+          mkdir -p artifacts
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD/artifacts":/artifacts \
+            public.ecr.aws/aws-nitro-enclaves/cli:release-latest \
+            build-enclave --docker-uri ${{ steps.build.outputs.image_uri }} \
+              --output-file /artifacts/${{ steps.meta.outputs.eif_name }} \
+              --target-platform x86_64
+
+      - name: Upload EIF to S3
+        run: |
+          aws s3 cp \
+            artifacts/${{ steps.meta.outputs.eif_name }} \
+            s3://${{ steps.meta.outputs.s3_bucket }}/${{ steps.meta.outputs.s3_prefix }}/${{ steps.meta.outputs.eif_name }}
+          echo "s3_object=s3://${{ steps.meta.outputs.s3_bucket }}/${{ steps.meta.outputs.s3_prefix }}/${{ steps.meta.outputs.eif_name }}" >> "$GITHUB_OUTPUT"
+        id: upload
+
+      - name: Trigger Nitro rollout
+        env:
+          INSTANCE_IDS: ${{ secrets.NITRO_PARENT_INSTANCE_IDS }}
+        run: |
+          if [ -z "$INSTANCE_IDS" ]; then
+            echo "NITRO_PARENT_INSTANCE_IDS secret is required" >&2
+            exit 1
+          fi
+
+          read -ra IDS <<< "${INSTANCE_IDS//,/ }"
+          S3_URI="${{ steps.upload.outputs.s3_object }}"
+          EIF_NAME="${{ steps.meta.outputs.eif_name }}"
+          if [ -z "$S3_URI" ] || [ -z "$EIF_NAME" ]; then
+            echo "Missing EIF metadata" >&2
+            exit 1
+          fi
+
+          cat <<EOF > ssm-params.json
+          {
+            "commands": [
+              "set -euo pipefail",
+              "aws s3 cp ${S3_URI} /opt/bitcast/${EIF_NAME}",
+              "sudo mkdir -p /opt/bitcast/enclaves",
+              "sudo mv /opt/bitcast/${EIF_NAME} /opt/bitcast/enclaves/${EIF_NAME}",
+              "sudo chmod 600 /opt/bitcast/enclaves/${EIF_NAME}",
+              "sudo nitro-cli terminate-enclave --all || true",
+              "sudo nitro-cli run-enclave --cpu-count ${{ inputs.enclave_cpu_count }} --memory ${{ inputs.enclave_memory_mib }} --enclave-cid ${{ inputs.enclave_cid }} --eif-path /opt/bitcast/enclaves/${EIF_NAME}"
+            ]
+          }
+          EOF
+
+          aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy Bitcast enclave ${GITHUB_RUN_ID}" \
+            --instance-ids "${IDS[@]}" \
+            --parameters file://ssm-params.json \
+            --region ${{ steps.meta.outputs.aws_region }}
