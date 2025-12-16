@@ -13,7 +13,7 @@ Provisioning this module is optional and controlled via `create_kms_key`/`kms_ke
 Launches a Nitro-capable Amazon Linux 2023 EC2 parent instance. It wires up security groups, IAM role/profile, enables the Nitro allocator and vsock proxy services via user data, and exposes tuning inputs (`enclave_cpu_count`, `enclave_memory_mib`, `allowed_ingress_cidrs`, etc.). Outputs surface the instance ID, security group ID, and IAM instance profile.
 
 ## Usage
-1. Copy `terraform.tfvars.example` to `terraform.tfvars` and adjust region, CIDRs, key pair, etc.
+1. Copy `terraform.tfvars.template` to `terraform.tfvars` and adjust region, CIDRs, key pair, etc.
 2. (Optional) Update `backend.tf` with your S3 bucket/DynamoDB table for remote state.
 3. Run `terraform init && terraform plan` (requires internet access to pull providers).
 4. Apply when ready: `terraform apply`.
