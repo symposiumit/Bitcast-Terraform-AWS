@@ -24,13 +24,17 @@ For application build/run instructions, consult the upstream [bitcast-network/bi
 
 ## Bitcast GitHub Actions Pipeline
 
-This repo includes a GitHub Actions workflow (`.github/workflows/bitcast-nitro.yml`) plus container templates under `bitcast-container/` that package the [bitcast-network/bitcast](https://github.com/bitcast-network/bitcast) codebase into a Nitro-ready enclave image.
+This repo includes a GitHub Actions workflow (`.github/workflows/bitcast-nitro.yml`) plus container templates under `bitcast-container/` that package the [bitcast-network/bitcast](https://github.com/bitcast-network/bitcast) codebase into a Nitro-ready enclave image. The workflow is triggered manually (`workflow_dispatch`) so operators explicitly decide which Bitcast commit and role (validator/miner) is promoted.
 
-Pipeline highlights:
-- Clones the upstream Bitcast repo at a chosen ref and copies `bitcast-container/Dockerfile` + `entrypoint.sh` into it.
-- Installs dependencies, runs the Bitcast test suite, builds a Linux/amd64 container, and pushes it to Amazon ECR.
-- Uses the public Nitro Enclaves CLI container to convert the image into an EIF artifact and uploads it to an S3 bucket.
-- Invokes AWS Systems Manager to pull the EIF onto the Nitro parent instances created by this Terraform stack and restarts the enclave with the requested CPU/memory/cid.
+### Pipeline flow
+1. **Checkout + Source Sync** – Actions checks out this infra repo, then clones `bitcast-network/bitcast` using the `bitcast_ref` input. The Dockerfile and entrypoint under `bitcast-container/` are copied into the Bitcast checkout so the build is reproducible from this repo.
+2. **Test & Build** – Python 3.10 is configured, Bitcast dependencies are installed, and `pytest -q` is executed. Docker Buildx then builds a Linux/amd64 container tagged as `<aws_account>.dkr.ecr.<region>.amazonaws.com/<BITCAST_ECR_REPOSITORY>:<tag>` and pushes it to Amazon ECR. The role (validator/miner) is injected via the `BITCAST_ROLE` build arg for the entrypoint script.
+3. **EIF Creation** – The workflow runs the public `aws-nitro-enclaves/cli` container to convert the pushed image into an EIF named `bitcast-<role>-<tag>.eif`, which is uploaded to `s3://<BITCAST_ENCLAVE_BUCKET>/<BITCAST_ENCLAVE_PREFIX>/`.
+4. **Deployment to Nitro Parents** – Using AWS Systems Manager, the workflow downloads the EIF to each Nitro parent (IDs provided in `NITRO_PARENT_INSTANCE_IDS`), stores it under `/opt/bitcast/enclaves/`, and restarts the enclave with the requested CPU/memory/CID values.
+
+Artifacts produced:
+- **Container images** live in the Amazon ECR repository defined by `BITCAST_ECR_REPOSITORY` (default `bitcast-nitro`). Apply lifecycle policies there to control retention.
+- **EIF binaries** are stored in the S3 bucket/prefix defined by `BITCAST_ENCLAVE_BUCKET` and `BITCAST_ENCLAVE_PREFIX` (defaults `bitcast-nitro-enclaves/eif`). Bucket versioning can be used for recovery.
 
 ### Required secrets & variables
 
@@ -42,5 +46,18 @@ Pipeline highlights:
 | `BITCAST_ECR_REPOSITORY` | repo variable (optional) | Name of the ECR repository that stores Bitcast images (`bitcast-nitro` by default). |
 | `BITCAST_ENCLAVE_BUCKET` | repo variable (optional) | S3 bucket holding EIF artifacts (`bitcast-nitro-enclaves` default). |
 | `BITCAST_ENCLAVE_PREFIX` | repo variable (optional) | Folder/prefix inside the bucket for EIF uploads (`eif` default). |
+| `BITCAST_ENCLAVE_ROLE` | repo variable (optional) | Default Bitcast role when no workflow input override is provided (`validator`). |
 
-Run the workflow manually via **Actions → Build Bitcast Enclave → Run workflow**, choose the Bitcast git ref and neuron role (validator/miner), and provide the desired enclave resources. The pipeline handles containerization and pushes the refreshed EIF to your Nitro fleet automatically.
+### Running the workflow
+1. Navigate to **GitHub → Actions → Build Bitcast Enclave** and click **Run workflow**.
+2. Provide inputs:
+   - `bitcast_ref` (branch/tag/commit from `bitcast-network/bitcast`).
+   - `bitcast_role` (`validator` or `miner`).
+   - Optional `image_tag` (defaults to the infra repo commit SHA).
+   - `enclave_cpu_count`, `enclave_memory_mib`, `enclave_cid` (resources used by `nitro-cli run-enclave`).
+3. Ensure `AWS_GITHUB_ROLE_ARN` allows:
+   - `sts:AssumeRole` (trust GitHub OIDC).
+   - `ecr:*` on the target repository.
+   - `s3:GetObject`/`PutObject` on the EIF bucket/prefix.
+   - `ssm:SendCommand` on the Nitro parent instance IDs.
+4. Monitor the run. On success you’ll have a new ECR image, an EIF in S3, and Nitro parents restarted with the fresh build. Because the process is fully declarative, rerunning with the same inputs will produce new artifacts without impacting previously published versions.
