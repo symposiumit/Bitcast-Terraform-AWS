@@ -14,3 +14,5 @@ Terraform modules that lay down the AWS infrastructure required to run Bitcast i
 4. Apply when ready: `terraform apply`.
 
 Outputs include VPC/subnets, the parent EC2 instance ID, security group, instance profile, and the KMS ARN when provisioned. Use the resulting parent instance as the target host for the Bitcast enclave workloads described in the Bitcast deployment guide.
+
+For application build/run instructions, consult the upstream [bitcast-network/bitcast-deploy README](https://github.com/bitcast-network/bitcast-deploy/blob/main/README.md); this Terraform stack simply prepares the AWS infrastructure that deployment expects.
