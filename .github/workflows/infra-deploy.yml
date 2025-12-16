@@ -1,0 +1,71 @@
+name: Deploy Nitro Infra
+
+on:
+  workflow_dispatch:
+    inputs:
+      terraform_action:
+        description: Select whether to run plan (default) or apply
+        type: choice
+        options: [plan, apply]
+        default: plan
+      terraform_directory:
+        description: Relative directory containing Terraform root module
+        required: false
+        default: .
+      aws_region:
+        description: AWS region override (defaults to eu-west-1)
+        required: false
+        default: eu-west-1
+
+env:
+  TF_IN_AUTOMATION: true
+  DEFAULT_REGION: eu-west-1
+
+jobs:
+  terraform:
+    name: Terraform ${{ github.event.inputs.terraform_action || 'plan' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      WORKING_DIR: ${{ github.event.inputs.terraform_directory || '.' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ github.event.inputs.aws_region || env.DEFAULT_REGION }}
+
+      - name: Terraform fmt check
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform plan
+        id: plan
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform plan -input=false -out=tfplan
+
+      - name: Upload plan artifact
+        if: ${{ github.event.inputs.terraform_action != 'apply' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: ${{ env.WORKING_DIR }}/tfplan
+
+      - name: Terraform apply
+        if: ${{ github.event.inputs.terraform_action == 'apply' }}
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform apply -input=false -auto-approve tfplan

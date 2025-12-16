@@ -22,6 +22,23 @@ Outputs include VPC/subnets, the parent EC2 instance ID, security group, instanc
 
 For application build/run instructions, consult the upstream [bitcast-network/bitcast-deploy README](https://github.com/bitcast-network/bitcast-deploy/blob/main/README.md); this Terraform stack simply prepares the AWS infrastructure that deployment expects.
 
+## Infrastructure Deployment Workflow
+
+`.github/workflows/infra-deploy.yml` is a dedicated Terraform automation workflow triggered manually (`workflow_dispatch`) so environment changes remain deliberate.
+
+Workflow summary:
+1. Check out this repository and install Terraform 1.6.6 via `hashicorp/setup-terraform`.
+2. Assume the IAM role defined by `AWS_GITHUB_ROLE_ARN` to access the Terraform backend and AWS account.
+3. Run `terraform fmt -check`, `terraform init`, and `terraform plan -out tfplan` inside the selected directory (defaults to repo root).
+4. When `terraform_action=plan` (default) the generated plan is uploaded as an artifact; when `terraform_action=apply` the workflow executes `terraform apply -auto-approve tfplan`.
+
+Inputs:
+- `terraform_action`: `plan` (default) or `apply`.
+- `terraform_directory`: relative path housing the Terraform configuration (default `.`).
+- `aws_region`: optional override for the AWS region (default `eu-west-1`).
+
+Trigger it via **Actions → Deploy Nitro Infra → Run workflow** after configuring secrets/variables. This keeps infrastructure lifecycle management independent from application builds.
+
 ## Bitcast GitHub Actions Pipeline
 
 This repo includes a GitHub Actions workflow (`.github/workflows/bitcast-nitro.yml`) plus container templates under `bitcast-container/` that package the [bitcast-network/bitcast](https://github.com/bitcast-network/bitcast) codebase into a Nitro-ready enclave image. The workflow is triggered manually (`workflow_dispatch`) so operators explicitly decide which Bitcast commit and role (validator/miner) is promoted.
